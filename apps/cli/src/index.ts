@@ -206,7 +206,7 @@ program
 				console.log(`[CLI] API Key: ${apiKey.substring(0, 8)}...`)
 			}
 
-			// Track worktree info for cleanup
+			// Track worktree info to use its path for the task
 			let createdWorktree: { path: string; branch: string } | null = null
 			let taskWorkspacePath = workspacePath
 
