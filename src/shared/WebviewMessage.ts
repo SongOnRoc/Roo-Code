@@ -180,6 +180,17 @@ export interface WebviewMessage {
 		| "downloadErrorDiagnostics"
 		| "requestClaudeCodeRateLimits"
 		| "refreshCustomTools"
+		// Worktree messages
+		| "listWorktrees"
+		| "createWorktree"
+		| "deleteWorktree"
+		| "switchWorktree"
+		| "getAvailableBranches"
+		| "getWorktreeDefaults"
+		| "getWorktreeIncludeStatus"
+		| "createWorktreeInclude"
+		| "checkoutBranch"
+		| "mergeWorktree"
 	text?: string
 	editedMessageContent?: string
 	tab?: "settings" | "history" | "mcp" | "modes" | "chat" | "marketplace" | "cloud"
@@ -265,6 +276,16 @@ export interface WebviewMessage {
 		codebaseIndexOpenRouterApiKey?: string
 	}
 	updatedSettings?: RooCodeSettings
+	// Worktree properties
+	worktreePath?: string
+	worktreeBranch?: string
+	worktreeBaseBranch?: string
+	worktreeCreateNewBranch?: boolean
+	worktreeForce?: boolean
+	worktreeNewWindow?: boolean
+	worktreeTargetBranch?: string
+	worktreeDeleteAfterMerge?: boolean
+	worktreeIncludeContent?: string
 }
 
 export const checkoutDiffPayloadSchema = z.object({

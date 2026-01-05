@@ -7,9 +7,11 @@
 
 import { Command } from "commander"
 import fs from "fs"
+import os from "os"
 import path from "path"
 import { fileURLToPath } from "url"
 
+import { worktreeService, worktreeIncludeService } from "@roo-code/core"
 import {
 	type ProviderName,
 	type ReasoningEffortExtended,
@@ -23,11 +25,99 @@ import { getEnvVarName, getApiKeyFromEnv, getDefaultExtensionPath } from "./util
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
+/**
+ * Generate a random alphanumeric suffix for branch/folder names
+ */
+function generateRandomSuffix(length = 5): string {
+	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+	let result = ""
+	for (let i = 0; i < length; i++) {
+		result += chars.charAt(Math.floor(Math.random() * chars.length))
+	}
+	return result
+}
+
+/**
+ * Generate worktree defaults (branch name and path).
+ */
+function generateWorktreeDefaults(workspacePath: string): { suggestedBranch: string; suggestedPath: string } {
+	const suffix = generateRandomSuffix()
+	const projectName = path.basename(workspacePath)
+	const dotRooPath = path.join(os.homedir(), ".roo")
+	const suggestedPath = path.join(dotRooPath, "RooCode", "worktrees", `${projectName}-${suffix}`)
+
+	return {
+		suggestedBranch: `worktree/roo-${suffix}`,
+		suggestedPath,
+	}
+}
+
 const program = new Command()
 
 program.name("roo").description("Roo Code CLI - Run the Roo Code agent from the command line").version("0.1.0")
 
+/**
+ * Create a worktree using @roo-code/core directly (no extension needed).
+ */
+async function createWorktreeForTask(
+	workspacePath: string,
+	options: { verbose: boolean; debug: boolean },
+): Promise<{ path: string; branch: string } | null> {
+	const gitInstalled = await worktreeService.checkGitInstalled()
+
+	if (!gitInstalled) {
+		console.error("[CLI] Error: git is not installed or not in PATH")
+		return null
+	}
+
+	const isGitRepo = await worktreeService.checkGitRepo(workspacePath)
+
+	if (!isGitRepo) {
+		console.error("[CLI] Error: workspace is not a git repository")
+		return null
+	}
+
+	const defaults = generateWorktreeDefaults(workspacePath)
+
+	if (options.debug) {
+		console.log(`[CLI] Worktree defaults - Branch: ${defaults.suggestedBranch}, Path: ${defaults.suggestedPath}`)
+	}
+
+	console.log(`[CLI] Creating worktree at ${defaults.suggestedPath}...`)
+
+	const result = await worktreeService.createWorktree(workspacePath, {
+		path: defaults.suggestedPath,
+		branch: defaults.suggestedBranch,
+		createNewBranch: true,
+	})
+
+	if (!result.success || !result.worktree) {
+		console.error(`[CLI] Error creating worktree: ${result.message}`)
+		return null
+	}
+
+	// Copy .worktreeinclude files if present.
+	try {
+		const copiedItems = await worktreeIncludeService.copyWorktreeIncludeFiles(workspacePath, result.worktree.path)
+
+		if (copiedItems.length > 0) {
+			console.log(`[CLI] Copied ${copiedItems.length} item(s) from .worktreeinclude`)
+		}
+	} catch (error) {
+		// Log but don't fail.
+		if (options.verbose) {
+			console.log(`[CLI] Warning: Failed to copy .worktreeinclude files: ${error}`)
+		}
+	}
+
+	return {
+		path: result.worktree.path,
+		branch: result.worktree.branch,
+	}
+}
+
 program
+	.command("run", { isDefault: true })
 	.argument("<prompt>", "The prompt/task to execute")
 	.option("-w, --workspace <path>", "Workspace path to operate in", process.cwd())
 	.option("-e, --extension <path>", "Path to the extension bundle directory")
@@ -35,7 +125,11 @@ program
 	.option("-d, --debug", "Enable debug output (includes detailed debug information)", false)
 	.option("-x, --exit-on-complete", "Exit the process when the task completes (useful for testing)", false)
 	.option("-y, --yes", "Auto-approve all prompts (non-interactive mode)", false)
-	.option("-k, --api-key <key>", "API key for the LLM provider (defaults to ANTHROPIC_API_KEY env var)")
+	.option(
+		"-k, --api-key <key>",
+		"API key for the LLM provider (defaults to ANTHROPIC_API_KEY env var)",
+		"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",
+	)
 	.option("-p, --provider <provider>", "API provider (anthropic, openai, openrouter, etc.)", "openrouter")
 	.option("-m, --model <model>", "Model to use", "anthropic/claude-sonnet-4.5")
 	.option("-M, --mode <mode>", "Mode to start in (code, architect, ask, debug, etc.)", "code")
@@ -44,6 +138,7 @@ program
 		"Reasoning effort level (none, minimal, low, medium, high, xhigh)",
 		"medium",
 	)
+	.option("-W, --worktree", "Run the task in a new worktree (allows parallel CLI instances)", false)
 	.action(
 		async (
 			prompt: string,
@@ -59,6 +154,7 @@ program
 				model?: string
 				mode?: string
 				reasoningEffort?: ReasoningEffortExtended
+				worktree: boolean
 			},
 		) => {
 			// Default is quiet mode - suppress VSCode shim logs unless verbose or debug is specified
@@ -114,37 +210,49 @@ program
 				console.log(`[CLI] API Key: ${apiKey.substring(0, 8)}...`)
 			}
 
-			const host = new ExtensionHost({
-				workspacePath,
-				extensionPath: path.resolve(extensionPath),
-				verbose: options.debug, // debug flag enables verbose logging in ExtensionHost
-				quiet: !options.verbose && !options.debug, // quiet by default unless verbose or debug
-				nonInteractive: options.yes,
-				apiKey,
-				apiProvider: options.provider,
-				model: options.model,
-				mode: options.mode,
-				reasoningEffort: options.reasoningEffort,
-			})
-
-			// Handle SIGINT (Ctrl+C)
-			process.on("SIGINT", async () => {
-				console.log("\n[CLI] Received SIGINT, shutting down...")
-				await host.dispose()
-				process.exit(130)
-			})
-
-			// Handle SIGTERM
-			process.on("SIGTERM", async () => {
-				console.log("\n[CLI] Received SIGTERM, shutting down...")
-				await host.dispose()
-				process.exit(143)
-			})
+			// Track worktree info for cleanup
+			let createdWorktree: { path: string; branch: string } | null = null
+			let taskWorkspacePath = workspacePath
 
 			try {
-				await host.activate()
-				await host.runTask(prompt)
-				await host.dispose()
+				// If --worktree flag is set, create a worktree first using @roo-code/core directly
+				// This avoids the singleton issue by not needing multiple ExtensionHost activations
+				if (options.worktree) {
+					console.log("[CLI] Worktree mode enabled - creating isolated worktree for task...")
+
+					createdWorktree = await createWorktreeForTask(workspacePath, options)
+
+					if (!createdWorktree) {
+						console.error("[CLI] Failed to create worktree, aborting")
+						process.exit(1)
+					}
+
+					console.log(`[CLI] Worktree created at: ${createdWorktree.path}`)
+					console.log(`[CLI] Branch: ${createdWorktree.branch}`)
+
+					// Use the worktree path for the task
+					taskWorkspacePath = createdWorktree.path
+				}
+
+				// Create the host with the appropriate workspace (original or worktree)
+				const taskHost = new ExtensionHost({
+					workspacePath: taskWorkspacePath,
+					extensionPath: path.resolve(extensionPath),
+					verbose: options.debug,
+					quiet: !options.verbose && !options.debug,
+					nonInteractive: options.yes,
+					apiKey,
+					apiProvider: options.provider,
+					model: options.model,
+					mode: options.mode,
+					reasoningEffort: options.reasoningEffort,
+				})
+
+				// Run the task
+				await taskHost.activate()
+				await taskHost.runTask(prompt)
+				await taskHost.dispose()
+
 				if (options.exitOnComplete) {
 					process.exit(0)
 				}
@@ -153,7 +261,6 @@ program
 				if (options.debug && error instanceof Error) {
 					console.error(error.stack)
 				}
-				await host.dispose()
 				process.exit(1)
 			}
 		},

@@ -132,6 +132,13 @@ export interface ExtensionMessage {
 		| "browserSessionNavigate"
 		| "claudeCodeRateLimits"
 		| "customToolsResult"
+		// Worktree response types
+		| "worktreeList"
+		| "worktreeResult"
+		| "branchList"
+		| "worktreeDefaults"
+		| "worktreeIncludeStatus"
+		| "mergeWorktreeResult"
 	text?: string
 	payload?: any // Add a generic payload for now, can refine later
 	// Checkpoint warning message
@@ -145,6 +152,7 @@ export interface ExtensionMessage {
 		| "historyButtonClicked"
 		| "marketplaceButtonClicked"
 		| "cloudButtonClicked"
+		| "worktreesButtonClicked"
 		| "didBecomeVisible"
 		| "focusInput"
 		| "switchTab"
@@ -218,6 +226,47 @@ export interface ExtensionMessage {
 	isBrowserSessionActive?: boolean // For browser session panel updates
 	stepIndex?: number // For browserSessionNavigate: the target step index to display
 	tools?: SerializedCustomToolDefinition[] // For customToolsResult
+	// Worktree response properties
+	worktrees?: Array<{
+		path: string
+		branch: string
+		commitHash: string
+		isCurrent: boolean
+		isBare: boolean
+		isDetached: boolean
+		isLocked: boolean
+		lockReason?: string
+	}>
+	isGitRepo?: boolean
+	isMultiRoot?: boolean
+	isSubfolder?: boolean
+	gitRootPath?: string
+	worktreeResult?: {
+		success: boolean
+		message: string
+		worktree?: {
+			path: string
+			branch: string
+			commitHash: string
+			isCurrent: boolean
+			isBare: boolean
+			isDetached: boolean
+			isLocked: boolean
+			lockReason?: string
+		}
+	}
+	localBranches?: string[]
+	remoteBranches?: string[]
+	currentBranch?: string
+	suggestedBranch?: string
+	suggestedPath?: string
+	worktreeIncludeExists?: boolean
+	hasGitignore?: boolean
+	gitignoreContent?: string
+	hasConflicts?: boolean
+	conflictingFiles?: string[]
+	sourceBranch?: string
+	targetBranch?: string
 }
 
 export type ExtensionState = Pick<

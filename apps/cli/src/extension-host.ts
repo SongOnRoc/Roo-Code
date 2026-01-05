@@ -285,6 +285,18 @@ export class ExtensionHost extends EventEmitter {
 	}
 
 	/**
+	 * Wait for the webview to be ready to receive messages
+	 */
+	async waitForWebviewReady(): Promise<void> {
+		if (this.isWebviewReady) {
+			return
+		}
+		return new Promise<void>((resolve) => {
+			this.once("webviewReady", resolve)
+		})
+	}
+
+	/**
 	 * Send any messages that were queued before the webview was ready
 	 */
 	private flushPendingMessages(): void {
