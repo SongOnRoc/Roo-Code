@@ -15,6 +15,7 @@ import type {
 	ShareVisibility,
 	QueuedMessage,
 	SerializedCustomToolDefinition,
+	WorktreeIncludeStatus,
 } from "@roo-code/types"
 
 import { GitCommit } from "../utils/git"
@@ -260,7 +261,7 @@ export interface ExtensionMessage {
 	currentBranch?: string
 	suggestedBranch?: string
 	suggestedPath?: string
-	worktreeIncludeExists?: boolean
+	worktreeIncludeStatus?: WorktreeIncludeStatus
 	hasGitignore?: boolean
 	gitignoreContent?: string
 	hasConflicts?: boolean
