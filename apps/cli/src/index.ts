@@ -125,11 +125,7 @@ program
 	.option("-d, --debug", "Enable debug output (includes detailed debug information)", false)
 	.option("-x, --exit-on-complete", "Exit the process when the task completes (useful for testing)", false)
 	.option("-y, --yes", "Auto-approve all prompts (non-interactive mode)", false)
-	.option(
-		"-k, --api-key <key>",
-		"API key for the LLM provider (defaults to ANTHROPIC_API_KEY env var)",
-		"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",
-	)
+	.option("-k, --api-key <key>", "API key for the LLM provider (defaults to ANTHROPIC_API_KEY env var)")
 	.option("-p, --provider <provider>", "API provider (anthropic, openai, openrouter, etc.)", "openrouter")
 	.option("-m, --model <model>", "Model to use", "anthropic/claude-sonnet-4.5")
 	.option("-M, --mode <mode>", "Mode to start in (code, architect, ask, debug, etc.)", "code")
