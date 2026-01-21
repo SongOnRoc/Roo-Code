@@ -313,6 +313,23 @@ export async function summarizeConversation(
 		text: `${prefaceParagraph}\n\n${summary}`,
 	}
 
+	// Check if the first message has a slash command block
+	let slashCommandBlock: Anthropic.Messages.ContentBlockParam | undefined
+	if (messages.length > 0) {
+		const firstMessage = messages[0]
+		if (firstMessage.role === "user" && Array.isArray(firstMessage.content)) {
+			const foundBlock = firstMessage.content.find(
+				(block) => block.type === "text" && block.text.includes("<command name="),
+			)
+			if (foundBlock && foundBlock.type === "text") {
+				slashCommandBlock = {
+					type: "text",
+					text: `<system-reminder>\n${foundBlock.text}\n</system-reminder>`,
+				}
+			}
+		}
+	}
+
 	const reminderBlocks: Anthropic.Messages.TextBlockParam[] = reminders.map((msg) => {
 		const tsValue = msg.ts ?? null
 		const rawContentJson = JSON.stringify(msg.content)
@@ -330,10 +347,11 @@ export async function summarizeConversation(
 		})
 	}
 
-	const summaryContent: Anthropic.Messages.ContentBlockParam[] = [summaryTextBlock, ...reminderBlocks].slice(
-		0,
-		1 + N_MESSAGES_TO_KEEP,
-	)
+	const summaryContent: Anthropic.Messages.ContentBlockParam[] = [
+		summaryTextBlock,
+		...(slashCommandBlock ? [slashCommandBlock] : []),
+		...reminderBlocks,
+	]
 
 	// Generate a unique condenseId for this summary
 	const condenseId = crypto.randomUUID()
