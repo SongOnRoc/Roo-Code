@@ -210,36 +210,32 @@ export async function summarizeConversation(
 
 	const response: SummarizeResponse = { messages, cost: 0, summary: "" }
 
-	// Always preserve the first message (which may contain slash command content)
-	const firstMessage = messages[0]
-
-	// Get keepMessages and any tool_use/reasoning blocks that need to be preserved for tool_result pairing.
-	const { keepMessages, toolUseBlocksToPreserve, reasoningBlocksToPreserve } = useNativeTools
-		? getKeepMessagesWithToolBlocks(messages, N_MESSAGES_TO_KEEP)
-		: {
-				keepMessages: messages.slice(-N_MESSAGES_TO_KEEP),
-				toolUseBlocksToPreserve: [],
-				reasoningBlocksToPreserve: [],
-			}
-
-	const keepStartIndex = Math.max(messages.length - N_MESSAGES_TO_KEEP, 0)
-	const includeFirstKeptMessageInSummary = toolUseBlocksToPreserve.length > 0
-	const summarySliceEnd = includeFirstKeptMessageInSummary ? keepStartIndex + 1 : keepStartIndex
-	const messagesBeforeKeep = summarySliceEnd > 0 ? messages.slice(0, summarySliceEnd) : []
-
-	// Get messages to summarize, including the first message and excluding the last N messages
-	const messagesToSummarize = getMessagesSinceLastSummary(messagesBeforeKeep)
-
-	if (messagesToSummarize.length <= 1) {
-		const error =
-			messages.length <= N_MESSAGES_TO_KEEP + 1
-				? t("common:errors.condense_not_enough_messages")
-				: t("common:errors.condensed_recently")
+	// We no longer preserve "kept" messages after condense. Instead, we:
+	// - Summarize everything except the last N messages
+	// - Embed the last N messages verbatim as <system-reminder> blocks inside the final summary message
+	// - Tag all previous messages with condenseParent so only the final message is effective for the API
+	//
+	// Keep the existing minimum threshold semantics: require at least (N_MESSAGES_TO_KEEP + 2) messages.
+	// With N_MESSAGES_TO_KEEP=3, this means at least 5 messages.
+	if (messages.length <= N_MESSAGES_TO_KEEP + 1) {
+		const error = t("common:errors.condense_not_enough_messages")
 		return { ...response, error }
 	}
 
-	// Check if there's a recent summary in the messages we're keeping
-	const recentSummaryExists = keepMessages.some((message: ApiMessage) => message.isSummary)
+	const reminders = messages.slice(-N_MESSAGES_TO_KEEP)
+
+	// Messages to summarize for the LLM call. This can include the reminder messages; they are
+	// also embedded verbatim into the final condensed output as <system-reminder> blocks.
+	const messagesToSummarize = getMessagesSinceLastSummary(messages)
+
+	// Defensive: if we somehow have nothing meaningful to summarize.
+	if (messagesToSummarize.length <= 1) {
+		const error = t("common:errors.condense_not_enough_messages")
+		return { ...response, error }
+	}
+
+	// Check if there's a recent summary in the messages we're embedding as reminders
+	const recentSummaryExists = reminders.some((message: ApiMessage) => message.isSummary)
 
 	if (recentSummaryExists) {
 		const error = t("common:errors.condensed_recently")
@@ -304,101 +300,74 @@ export async function summarizeConversation(
 		return { ...response, cost, error }
 	}
 
-	// Build the summary message content
-	// CRITICAL: Always include a reasoning block in the summary for DeepSeek-reasoner compatibility.
-	// DeepSeek-reasoner requires `reasoning_content` on ALL assistant messages, not just those with tool_calls.
-	// Without this, we get: "400 Missing `reasoning_content` field in the assistant message"
-	// See: https://api-docs.deepseek.com/guides/thinking_mode
-	//
-	// The summary content structure is:
-	// 1. Synthetic reasoning block (always present) - for DeepSeek-reasoner compatibility
-	// 2. Any preserved reasoning blocks from the condensed assistant message (if tool_use blocks are preserved)
-	// 3. Text block with the summary
-	// 4. Tool_use blocks (if any need to be preserved for tool_result pairing)
+	// Build the final "condensed context" message.
+	// After condense, the effective API history MUST be exactly one final role:"user" message
+	// whose content is 4 text blocks:
+	// 1) preface paragraph + summary text
+	// 2-4) <system-reminder> blocks for the last 3 messages (role+ts+raw content JSON)
+	const prefaceParagraph =
+		"Condensing conversation context. The summary below captures the key information from the prior conversation."
 
-	// Create a synthetic reasoning block that explains the summary
-	// This is minimal but satisfies DeepSeek's requirement for reasoning_content on all assistant messages
-	const syntheticReasoningBlock = {
-		type: "reasoning" as const,
-		text: "Condensing conversation context. The summary below captures the key information from the prior conversation.",
+	const summaryTextBlock: Anthropic.Messages.TextBlockParam = {
+		type: "text",
+		text: `${prefaceParagraph}\n\n${summary}`,
 	}
 
-	const textBlock: Anthropic.Messages.TextBlockParam = { type: "text", text: summary }
+	const reminderBlocks: Anthropic.Messages.TextBlockParam[] = reminders.map((msg) => {
+		const tsValue = msg.ts ?? null
+		const rawContentJson = JSON.stringify(msg.content)
+		return {
+			type: "text",
+			text: `<system-reminder role="${msg.role}" ts="${tsValue}">${rawContentJson}</system-reminder>`,
+		}
+	})
 
-	let summaryContent: Anthropic.Messages.ContentBlockParam[]
-	if (toolUseBlocksToPreserve.length > 0) {
-		// Include: synthetic reasoning, preserved reasoning (if any), summary text, and tool_use blocks
-		summaryContent = [
-			syntheticReasoningBlock as unknown as Anthropic.Messages.ContentBlockParam,
-			...reasoningBlocksToPreserve,
-			textBlock,
-			...toolUseBlocksToPreserve,
-		]
-	} else {
-		// Include: synthetic reasoning and summary text
-		// This ensures the summary always has reasoning_content for DeepSeek-reasoner
-		summaryContent = [syntheticReasoningBlock as unknown as Anthropic.Messages.ContentBlockParam, textBlock]
+	// Ensure we always produce exactly 3 reminder blocks. If fewer exist (should be rare), pad with explicit empties.
+	while (reminderBlocks.length < N_MESSAGES_TO_KEEP) {
+		reminderBlocks.unshift({
+			type: "text",
+			text: `<system-reminder role="unknown" ts="null">null</system-reminder>`,
+		})
 	}
+
+	const summaryContent: Anthropic.Messages.ContentBlockParam[] = [summaryTextBlock, ...reminderBlocks].slice(
+		0,
+		1 + N_MESSAGES_TO_KEEP,
+	)
 
 	// Generate a unique condenseId for this summary
 	const condenseId = crypto.randomUUID()
 
-	// Use first kept message's timestamp minus 1 to ensure unique timestamp for summary.
-	// Fallback to Date.now() if keepMessages is empty (shouldn't happen due to earlier checks).
-	const firstKeptTs = keepMessages[0]?.ts ?? Date.now()
-
+	const lastTs = messages[messages.length - 1]?.ts ?? Date.now()
 	const summaryMessage: ApiMessage = {
-		role: "assistant",
+		role: "user",
 		content: summaryContent,
-		ts: firstKeptTs - 1, // Unique timestamp before first kept message to avoid collision
+		ts: lastTs + 1,
 		isSummary: true,
-		condenseId, // Unique ID for this summary, used to track which messages it replaces
+		condenseId,
 	}
 
 	// NON-DESTRUCTIVE CONDENSE:
-	// Instead of deleting middle messages, tag them with condenseParent so they can be
-	// restored if the user rewinds to a point before the summary.
-	//
-	// Storage structure after condense:
-	// [firstMessage, msg2(parent=X), ..., msg8(parent=X), summary(id=X), msg9, msg10, msg11]
-	//
-	// Effective for API (filtered by getEffectiveApiHistory):
-	// [firstMessage, summary, msg9, msg10, msg11]
-
-	// Tag middle messages with condenseParent (skip first message, skip last N messages)
-	const newMessages = messages.map((msg, index) => {
-		// First message stays as-is
-		if (index === 0) {
-			return msg
-		}
-		// Messages in the "keep" range stay as-is
-		if (index >= keepStartIndex) {
-			return msg
-		}
-		// Middle messages get tagged with condenseParent (unless they already have one from a previous condense)
-		// If they already have a condenseParent, we leave it - nested condense is handled by filtering
+	// Tag all prior messages (including the last N reminders) with condenseParent so only
+	// the final summaryMessage is effective. Preserve nested condense by not overwriting
+	// an existing condenseParent.
+	const taggedMessages = messages.map((msg) => {
 		if (!msg.condenseParent) {
 			return { ...msg, condenseParent: condenseId }
 		}
 		return msg
 	})
 
-	// Insert the summary message right before the keep messages
-	newMessages.splice(keepStartIndex, 0, summaryMessage)
+	const newMessages = [...taggedMessages, summaryMessage]
 
-	// Count the tokens in the context for the next API request
-	// We only estimate the tokens in summaryMesage if outputTokens is 0, otherwise we use outputTokens
+	// Count the tokens in the context for the next API request.
+	// The next API request will include the system prompt plus the final condensed user message.
 	const systemPromptMessage: ApiMessage = { role: "user", content: systemPrompt }
-
-	const contextMessages = outputTokens
-		? [systemPromptMessage, ...keepMessages]
-		: [systemPromptMessage, summaryMessage, ...keepMessages]
-
-	const contextBlocks = contextMessages.flatMap((message) =>
+	const contextBlocks = [systemPromptMessage, summaryMessage].flatMap((message) =>
 		typeof message.content === "string" ? [{ text: message.content, type: "text" as const }] : message.content,
 	)
 
-	const newContextTokens = outputTokens + (await apiHandler.countTokens(contextBlocks))
+	const newContextTokens = await apiHandler.countTokens(contextBlocks)
 	if (newContextTokens >= prevContextTokens) {
 		const error = t("common:errors.condense_context_grew")
 		return { ...response, cost, error }
@@ -416,26 +385,6 @@ export function getMessagesSinceLastSummary(messages: ApiMessage[]): ApiMessage[
 
 	const lastSummaryIndex = messages.length - lastSummaryIndexReverse - 1
 	const messagesSinceSummary = messages.slice(lastSummaryIndex)
-
-	// Bedrock requires the first message to be a user message.
-	// We preserve the original first message to maintain context.
-	// See https://github.com/RooCodeInc/Roo-Code/issues/4147
-	if (messagesSinceSummary.length > 0 && messagesSinceSummary[0].role !== "user") {
-		// Get the original first message (should always be a user message with the task)
-		const originalFirstMessage = messages[0]
-		if (originalFirstMessage && originalFirstMessage.role === "user") {
-			// Use the original first message unchanged to maintain full context
-			return [originalFirstMessage, ...messagesSinceSummary]
-		} else {
-			// Fallback to generic message if no original first message exists (shouldn't happen)
-			const userMessage: ApiMessage = {
-				role: "user",
-				content: "Please continue from the following summary:",
-				ts: messages[0]?.ts ? messages[0].ts - 1 : Date.now(),
-			}
-			return [userMessage, ...messagesSinceSummary]
-		}
-	}
 
 	return messagesSinceSummary
 }
@@ -470,11 +419,23 @@ export function getEffectiveApiHistory(messages: ApiMessage[]): ApiMessage[] {
 
 	// Filter out messages whose condenseParent points to an existing summary
 	// or whose truncationParent points to an existing truncation marker.
-	// Messages with orphaned parents (summary/marker was deleted) are included
+	// Messages with orphaned parents (summary/marker was deleted) are included.
+	//
+	// Additionally, when a summary exists, ONLY that summary should remain effective;
+	// any non-summary messages with the same condenseParent must be filtered.
 	return messages.filter((msg) => {
 		// Filter out condensed messages if their summary exists
 		if (msg.condenseParent && existingSummaryIds.has(msg.condenseParent)) {
 			return false
+		}
+		// If a summary exists, any non-summary message that shares its condenseParent should be hidden.
+		// This handles the new condense output where *all* previous messages are tagged.
+		if (!msg.isSummary) {
+			for (const summaryId of existingSummaryIds) {
+				if (msg.condenseParent === summaryId) {
+					return false
+				}
+			}
 		}
 		// Filter out truncated messages if their truncation marker exists
 		if (msg.truncationParent && existingTruncationIds.has(msg.truncationParent)) {
