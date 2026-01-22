@@ -302,9 +302,10 @@ export async function summarizeConversation(
 
 	// Build the final "condensed context" message.
 	// After condense, the effective API history MUST be exactly one final role:"user" message
-	// whose content is 4 text blocks:
-	// 1) preface paragraph + summary text
-	// 2-4) <system-reminder> blocks for the last 3 messages (role+ts+raw content JSON)
+	// whose content consists of:
+	// - preface paragraph + summary text
+	// - (optional) <system-reminder> block preserving any <command> from the first message
+	// - N_MESSAGES_TO_KEEP <system-reminder> blocks for the last N messages (role+ts+raw content JSON)
 	const prefaceParagraph =
 		"Condensing conversation context. The summary below captures the key information from the prior conversation."
 
@@ -438,22 +439,10 @@ export function getEffectiveApiHistory(messages: ApiMessage[]): ApiMessage[] {
 	// Filter out messages whose condenseParent points to an existing summary
 	// or whose truncationParent points to an existing truncation marker.
 	// Messages with orphaned parents (summary/marker was deleted) are included.
-	//
-	// Additionally, when a summary exists, ONLY that summary should remain effective;
-	// any non-summary messages with the same condenseParent must be filtered.
 	return messages.filter((msg) => {
 		// Filter out condensed messages if their summary exists
 		if (msg.condenseParent && existingSummaryIds.has(msg.condenseParent)) {
 			return false
-		}
-		// If a summary exists, any non-summary message that shares its condenseParent should be hidden.
-		// This handles the new condense output where *all* previous messages are tagged.
-		if (!msg.isSummary) {
-			for (const summaryId of existingSummaryIds) {
-				if (msg.condenseParent === summaryId) {
-					return false
-				}
-			}
 		}
 		// Filter out truncated messages if their truncation marker exists
 		if (msg.truncationParent && existingTruncationIds.has(msg.truncationParent)) {
